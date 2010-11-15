@@ -46,7 +46,6 @@
 struct scrap_message {
 	u32 scrap_id;
 	u32 busy;
-	u32 count;
 	struct list_head list;
 	struct completion completion;
 	struct spi_message spi_msg;
@@ -66,6 +65,8 @@ struct scrap_dev {
 	struct spi_device *spi_device;	
 	struct hrtimer timer;
 	u32 running;
+	u32 spi_callback_counter;
+	u32 timer_callback_counter;
 	char *user_buff;
 };
 
@@ -75,7 +76,7 @@ static struct scrap_dev scrap_dev;
 static void scrap_async_complete(void *arg)
 {
 	scrap_msg.busy = 0;
-	scrap_msg.count++;
+	scrap_dev.spi_callback_counter++;
 	complete(&scrap_msg.completion);
 }
 
@@ -125,6 +126,8 @@ scrap_async_done:
 
 static enum hrtimer_restart timer_callback(struct hrtimer *timer)
 {
+	scrap_dev.timer_callback_counter++;
+
 	if (!scrap_dev.running) {
 		return HRTIMER_NORESTART;
 	}
@@ -178,7 +181,8 @@ static ssize_t scrap_write(struct file *filp, const char __user *buff,
 			goto scrap_write_done;
 		}
 
-		scrap_msg.count = 0;
+		scrap_dev.spi_callback_counter = 0;		
+		scrap_dev.timer_callback_counter = 0;
 
 		hrtimer_start(&scrap_dev.timer, 
 				ktime_set(0, TIMER_PERIOD_NS),
@@ -214,11 +218,15 @@ static ssize_t scrap_read(struct file *filp, char __user *buff, size_t count,
 		return -ERESTARTSYS;
 
 	if (scrap_dev.running) {
-		sprintf(scrap_dev.user_buff, "running : %u spi writes\n",
-			scrap_msg.count);
+		sprintf(scrap_dev.user_buff, 
+			"running : spi %u  timer %u\n",
+			scrap_dev.spi_callback_counter, 
+			scrap_dev.timer_callback_counter);
 	} else {
-		sprintf(scrap_dev.user_buff, "not running : %u spi writes\n",
-			scrap_msg.count);
+		sprintf(scrap_dev.user_buff, 
+			"not running : spi %u  timer %u \n",
+			scrap_dev.spi_callback_counter, 
+			scrap_dev.timer_callback_counter);
 	}
 
 	len = strlen(scrap_dev.user_buff);
