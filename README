@@ -1,0 +1,27 @@
+A quick hack spi test for gumstix overo.
+
+Tested with 2.6.34
+
+Doesn't do anything useful without a scope or signal analyzer also.
+
+Uses an hrtimer to trigger spi writes on at a fixed rate.
+
+Watch SPI1.CS0 with a scope.
+
+# insmod scrap.ko
+# echo start > /dev/scrap
+... watch with scope
+# echo stop > /dev/scrap
+
+
+If you read from the module, you'll get the number of spi writes
+# cat /dev/scrap
+running : 24175 spi writes
+
+
+There is no error checking in this driver. It was only written for one-off
+debugging session of another problem where we weren't sure if it was code
+or hardware.
+
+Take from it if you find something useful.
+
