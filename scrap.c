@@ -360,15 +360,7 @@ static int __init add_scrap_device_to_bus(void)
 	/* CS1 = 0 */
 	spi_device->chip_select = SPI_BUS_CS1;
 
-	/* 
-	 * First check if the bus already knows about us.
-	 * This only tests for bus/chip select not driver name. If there is
-	 * already a spi driver registered for this bus/cs even if it is not
-	 * loaded, then this check will be insufficient and this driver will
-	 * not work. This check is really only good at handling the case where 
-	 * this driver is getting loaded/unloaded during development.
-	 * TODO: Investigate a proper bus/cs/driver name check
-	 */
+	/* First check if the bus already knows about us. */
 	snprintf(buff, sizeof(buff), "%s.%u", 
 			dev_name(&spi_device->master->dev),
 			spi_device->chip_select);
