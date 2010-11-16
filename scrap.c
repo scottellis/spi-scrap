@@ -73,14 +73,14 @@ struct scrap_dev {
 static struct scrap_dev scrap_dev;
 
 
-static void scrap_async_complete(void *arg)
+static void scrap_spi_callback(void *arg)
 {
 	scrap_msg.busy = 0;
 	scrap_dev.spi_callback_counter++;
 	complete(&scrap_msg.completion);
 }
 
-static int scrap_async(void)
+static int scrap_queue_spi_transaction(void)
 {
 	int status;
 	struct spi_message *message;
@@ -98,7 +98,8 @@ static int scrap_async(void)
 
 	message = &scrap_msg.spi_msg;
 	spi_message_init(message);
-	message->complete = scrap_async_complete;
+	message->complete = scrap_spi_callback;
+	/* Not using this, but it will be the argument to scrap_spi_callback. */
 	message->context = &scrap_msg;
 	
 	scrap_msg.tx_buff[0] = 0;
@@ -114,7 +115,9 @@ static int scrap_async(void)
 			
 	status = spi_async(scrap_dev.spi_device, message);
 
-	if (!status)
+	if (status)
+		printk(KERN_ALERT "spi_async() failed - error %d\n", status);
+	else
 		scrap_msg.busy = 1;
 
 scrap_async_done:
@@ -133,10 +136,13 @@ static enum hrtimer_restart timer_callback(struct hrtimer *timer)
 	}
 
 	if (scrap_msg.busy) {
+		/*
+		 * Don't clobber a pending spi transaction, but do restart the
+		 * timer. Haven't hit this case yet.
+		 */
 		printk(KERN_ALERT "scrap_msg still busy in timer callback\n");
 	}
-	else if (scrap_async()) {
-		printk(KERN_ALERT "spi_async() failed in timer callback\n");
+	else if (scrap_queue_spi_transaction()) {
 		return HRTIMER_NORESTART;
 	}
 
@@ -164,7 +170,7 @@ static ssize_t scrap_write(struct file *filp, const char __user *buff,
 
 	status = count;
 
-	/* we accept two commands, "start" or "stop" and ignore anything else*/
+	/* Accept two commands, "start" or "stop" and ignore anything else. */
 	if (!strnicmp(scrap_dev.user_buff, "start", 5)) {
 		if (scrap_dev.running) {
 			printk(KERN_ALERT "already running\n");
@@ -176,10 +182,8 @@ static ssize_t scrap_write(struct file *filp, const char __user *buff,
 			goto scrap_write_done;		
 		}
 
-		if (scrap_async()) {
-			printk(KERN_ALERT "scrap_async failed\n");
+		if (scrap_queue_spi_transaction())
 			goto scrap_write_done;
-		}
 
 		scrap_dev.spi_callback_counter = 0;		
 		scrap_dev.timer_callback_counter = 0;
@@ -189,7 +193,7 @@ static ssize_t scrap_write(struct file *filp, const char __user *buff,
         	               	HRTIMER_MODE_REL);
 
 		scrap_dev.running = 1; 
-	}
+	} 
 	else if (!strnicmp(scrap_dev.user_buff, "stop", 4)) {
 		hrtimer_cancel(&scrap_dev.timer);
 		scrap_dev.running = 0;
@@ -210,7 +214,10 @@ static ssize_t scrap_read(struct file *filp, char __user *buff, size_t count,
 	if (!buff) 
 		return -EFAULT;
 
-	/* tell the user there is no more */
+	/* 
+	 * Tell the user no more data. A hack so 'cat /dev/scrap' works since
+	 * we aren't keeping track of data we've already copied. 
+	 */
 	if (*offp > 0) 
 		return 0;
 
@@ -281,7 +288,8 @@ static int scrap_probe(struct spi_device *spi_device)
 	}
 
 	if (!status) 
-		printk(KERN_ALERT "SPI[%d] max_speed_hz %d Hz  bus_speed %d Hz\n", 
+		printk(KERN_ALERT 
+			"SPI[%d] max_speed_hz %d Hz  bus_speed %d Hz\n", 
 			spi_device->chip_select, 
 			spi_device->max_speed_hz, 
 			SPI_BUS_SPEED);
@@ -311,6 +319,7 @@ static int __init add_scrap_device_to_bus(void)
 	int status;
 	char buff[64];
 
+	/* Get a handle to the SPI-1 bus. */
 	spi_master = spi_busnum_to_master(1);
 
 	if (!spi_master) {
@@ -319,6 +328,10 @@ static int __init add_scrap_device_to_bus(void)
 		return -1;
 	}
 
+	/*
+	 * Allocate a device for this bus that we can use in bus queries and
+	 * if needed for adding to the bus.
+	 */
 	spi_device = spi_alloc_device(spi_master);
 
 	if (!spi_device) {
@@ -327,19 +340,31 @@ static int __init add_scrap_device_to_bus(void)
 		return -1;
 	}
 
+	/* CS1 = 0 */
 	spi_device->chip_select = 0;
 
-	/* first check if the bus already knows about us */
+	/* 
+	 * First check if the bus already knows about us.
+	 * This only tests for bus/chip select not driver name. If there is
+	 * already a spi driver registered for this bus/cs even if it is not
+	 * loaded, then this check will be insufficient and this driver will
+	 * not work. This check is really only good at handling the case where 
+	 * this driver is getting loaded/unloaded during development.
+	 * TODO: Investigate a proper bus/cs/driver name check
+	 */
 	snprintf(buff, sizeof(buff), "%s.%u", 
 			dev_name(&spi_device->master->dev),
 			spi_device->chip_select);
 
 	if (bus_find_device_by_name(spi_device->dev.bus, NULL, buff)) {
 		/* 
-		We are already registered, nothing to do, just free
-		the spi_device. Crashes without a patched 
-		omap2_mcspi_cleanup() 
-		*/
+		 * There is already a device at this cs registered on the bus.
+		 * If it is us, there is nothing to do, just free the device.
+		 * If it is some other driver registered at this cs, then we
+		 * fail silently by not doing anything.
+		 * The device free operation, spi_dev_put(), will crash without 
+		 * a patched omap2_mcspi_cleanup() on kernels < 2.6.34. 
+		 */
 		spi_dev_put(spi_device);
 		status = 0;
 	} else {
@@ -354,9 +379,9 @@ static int __init add_scrap_device_to_bus(void)
 		
 		if (status < 0) {	
 			/* 
-			crashes without a patched 
-			omap2_mcspi_cleanup() 
-			*/	
+			 * Crashes without patched omap2_mcspi_cleanup() on
+			 * kernels < 2.6.34 
+			 */	
 			spi_dev_put(spi_device);
 			printk(KERN_ALERT "spi_add_device() failed: %d\n", 
 				status);		
