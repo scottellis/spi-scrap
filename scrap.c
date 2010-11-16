@@ -43,8 +43,12 @@
 /* 5 ms = 200 Hz */
 #define TIMER_PERIOD_NS 5000000
 
+#define SPI_BUS 1
+#define SPI_BUS_CS1 0
+
+const char this_driver_name[] = "scrap";
+
 struct scrap_message {
-	u32 scrap_id;
 	u32 busy;
 	struct list_head list;
 	struct completion completion;
@@ -277,20 +281,29 @@ static int scrap_probe(struct spi_device *spi_device)
 	if (down_interruptible(&scrap_dev.spi_sem))
 		return -EBUSY;
 
-	if (spi_device->chip_select == 0) {
+	if (spi_device->chip_select == SPI_BUS_CS1) {
 		scrap_dev.spi_device = spi_device;
-		scrap_msg.scrap_id = 0;
 		init_completion(&scrap_msg.completion);
-	} else {
+	}
+	else {
 		status = -ENODEV;
 	}
 
-	if (!status) 
-		printk(KERN_ALERT 
-			"SPI[%d] max_speed_hz %d Hz  bus_speed %d Hz\n", 
-			spi_device->chip_select, 
-			spi_device->max_speed_hz, 
-			SPI_BUS_SPEED);
+	if (!status) {
+		if (spi_device->max_speed_hz != SPI_BUS_SPEED)
+			printk(KERN_ALERT 
+				"SPI%d.%d max_speed_hz %d Hz bus_speed %d Hz\n", 
+				SPI_BUS,
+				spi_device->chip_select, 
+				spi_device->max_speed_hz, 
+				SPI_BUS_SPEED);
+		else
+			printk(KERN_ALERT
+				"SPI%d.%d bus_speed %d Hz\n",
+				SPI_BUS, 
+				spi_device->chip_select,
+				SPI_BUS_SPEED);
+	}	
 	
 	up(&scrap_dev.spi_sem);
 
@@ -319,11 +332,12 @@ static int __init add_scrap_device_to_bus(void)
 {
 	struct spi_master *spi_master;
 	struct spi_device *spi_device;
+	struct device *pdev;
 	int status;
 	char buff[64];
 
 	/* Get a handle to the SPI-1 bus. */
-	spi_master = spi_busnum_to_master(1);
+	spi_master = spi_busnum_to_master(SPI_BUS);
 
 	if (!spi_master) {
 		printk(KERN_ALERT "spi_busnum_to_master(1) returned NULL\n");
@@ -344,7 +358,7 @@ static int __init add_scrap_device_to_bus(void)
 	}
 
 	/* CS1 = 0 */
-	spi_device->chip_select = 0;
+	spi_device->chip_select = SPI_BUS_CS1;
 
 	/* 
 	 * First check if the bus already knows about us.
@@ -359,17 +373,31 @@ static int __init add_scrap_device_to_bus(void)
 			dev_name(&spi_device->master->dev),
 			spi_device->chip_select);
 
-	if (bus_find_device_by_name(spi_device->dev.bus, NULL, buff)) {
+	pdev = bus_find_device_by_name(spi_device->dev.bus, NULL, buff);
+ 
+	if (pdev) {
 		/* 
-		 * There is already a device at this cs registered on the bus.
-		 * If it is us, there is nothing to do, just free the device.
-		 * If it is some other driver registered at this cs, then we
-		 * fail silently by not doing anything.
+		 * Don't need this new device. 
 		 * The device free operation, spi_dev_put(), will crash without 
 		 * a patched omap2_mcspi_cleanup() on kernels < 2.6.34. 
 		 */
 		spi_dev_put(spi_device);
-		status = 0;
+		
+		/* 
+		 * There is already a device at this cs registered on the bus.
+		 * If it is us, there is nothing to do. If it is some other 
+		 * driver registered at this cs, then complain and fail.
+		 */
+		if (pdev->driver && pdev->driver->name && 
+				strcmp(this_driver_name, pdev->driver->name)) {
+			printk(KERN_ALERT 
+				"Driver [%s] already registered for %s\n",
+				pdev->driver->name, buff);
+			status = -1;
+		} 
+		else {
+			status = 0;
+		}
 	} else {
 		spi_device->max_speed_hz = SPI_BUS_SPEED;
 		spi_device->mode = SPI_MODE_0;
@@ -377,7 +405,7 @@ static int __init add_scrap_device_to_bus(void)
 		spi_device->irq = -1;
 		spi_device->controller_state = NULL;
 		spi_device->controller_data = NULL;
-		strlcpy(spi_device->modalias, "scrap", SPI_NAME_SIZE);
+		strlcpy(spi_device->modalias, this_driver_name, SPI_NAME_SIZE);
 		status = spi_add_device(spi_device);
 		
 		if (status < 0) {	
@@ -437,7 +465,8 @@ static int __init scrap_init_cdev(void)
 
 	scrap_dev.devt = MKDEV(0, 0);
 
-	if ((error = alloc_chrdev_region(&scrap_dev.devt, 0, 1, "scrap")) < 0) {
+	error = alloc_chrdev_region(&scrap_dev.devt, 0, 1, this_driver_name);
+	if (error < 0) {
 		printk(KERN_ALERT "alloc_chrdev_region() failed: %d \n", 
 			error);
 		return -1;
@@ -458,15 +487,17 @@ static int __init scrap_init_cdev(void)
 
 static int __init scrap_init_class(void)
 {
-	scrap_dev.class = class_create(THIS_MODULE, "scrap");
+	scrap_dev.class = class_create(THIS_MODULE, this_driver_name);
 
 	if (!scrap_dev.class) {
 		printk(KERN_ALERT "class_create() failed\n");
 		return -1;
 	}
 
-	if (!device_create(scrap_dev.class, NULL, scrap_dev.devt, NULL, "scrap")) {
-		printk(KERN_ALERT "device_create(..., scrap) failed\n");
+	if (!device_create(scrap_dev.class, NULL, scrap_dev.devt, NULL, 	
+			this_driver_name)) {
+		printk(KERN_ALERT "device_create(..., %s) failed\n",
+			this_driver_name);
 		class_destroy(scrap_dev.class);
 		return -1;
 	}
