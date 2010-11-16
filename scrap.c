@@ -65,8 +65,9 @@ struct scrap_dev {
 	struct spi_device *spi_device;	
 	struct hrtimer timer;
 	u32 running;
-	u32 spi_callback_counter;
-	u32 timer_callback_counter;
+	u32 spi_callbacks;
+	u32 timer_callbacks;
+	u32 timer_misses;
 	char *user_buff;
 };
 
@@ -76,7 +77,7 @@ static struct scrap_dev scrap_dev;
 static void scrap_spi_callback(void *arg)
 {
 	scrap_msg.busy = 0;
-	scrap_dev.spi_callback_counter++;
+	scrap_dev.spi_callbacks++;
 	complete(&scrap_msg.completion);
 }
 
@@ -129,7 +130,7 @@ scrap_async_done:
 
 static enum hrtimer_restart timer_callback(struct hrtimer *timer)
 {
-	scrap_dev.timer_callback_counter++;
+	scrap_dev.timer_callbacks++;
 
 	if (!scrap_dev.running) {
 		return HRTIMER_NORESTART;
@@ -146,7 +147,8 @@ static enum hrtimer_restart timer_callback(struct hrtimer *timer)
 		return HRTIMER_NORESTART;
 	}
 
-	hrtimer_forward_now(&scrap_dev.timer, ktime_set(0, TIMER_PERIOD_NS));
+	scrap_dev.timer_misses += hrtimer_forward_now(&scrap_dev.timer,
+		ktime_set(0, TIMER_PERIOD_NS)) - 1;
 	
 	return HRTIMER_RESTART;
 }
@@ -184,9 +186,10 @@ static ssize_t scrap_write(struct file *filp, const char __user *buff,
 
 		if (scrap_queue_spi_transaction())
 			goto scrap_write_done;
-
-		scrap_dev.spi_callback_counter = 0;		
-		scrap_dev.timer_callback_counter = 0;
+		
+		scrap_dev.spi_callbacks = 0;		
+		scrap_dev.timer_callbacks = 0;
+		scrap_dev.timer_misses = 0;
 
 		hrtimer_start(&scrap_dev.timer, 
 				ktime_set(0, TIMER_PERIOD_NS),
@@ -224,17 +227,12 @@ static ssize_t scrap_read(struct file *filp, char __user *buff, size_t count,
 	if (down_interruptible(&scrap_dev.fop_sem)) 
 		return -ERESTARTSYS;
 
-	if (scrap_dev.running) {
-		sprintf(scrap_dev.user_buff, 
-			"running : spi %u  timer %u\n",
-			scrap_dev.spi_callback_counter, 
-			scrap_dev.timer_callback_counter);
-	} else {
-		sprintf(scrap_dev.user_buff, 
-			"not running : spi %u  timer %u \n",
-			scrap_dev.spi_callback_counter, 
-			scrap_dev.timer_callback_counter);
-	}
+	sprintf(scrap_dev.user_buff, 
+		"%s : spi %u  timer %u  timer_misses %u\n",
+		scrap_dev.running ? "running" : "not running",
+		scrap_dev.spi_callbacks, 
+		scrap_dev.timer_callbacks,
+		scrap_dev.timer_misses);
 
 	len = strlen(scrap_dev.user_buff);
  
@@ -301,6 +299,11 @@ static int scrap_probe(struct spi_device *spi_device)
 
 static int scrap_remove(struct spi_device *spi_device)
 {
+	if (scrap_dev.running) {
+		hrtimer_cancel(&scrap_dev.timer);
+		scrap_dev.running = 0;
+	}
+
 	if (down_interruptible(&scrap_dev.spi_sem))
 		return -EBUSY;
 	
