@@ -51,7 +51,6 @@ const char this_driver_name[] = "scrap";
 struct scrap_message {
 	u32 busy;
 	struct list_head list;
-	struct completion completion;
 	struct spi_message spi_msg;
 	struct spi_transfer transfer;
 	u8 rx_buff[32];
@@ -82,7 +81,6 @@ static void scrap_spi_callback(void *arg)
 {
 	scrap_msg.busy = 0;
 	scrap_dev.spi_callbacks++;
-	complete(&scrap_msg.completion);
 }
 
 static int scrap_queue_spi_transaction(void)
@@ -98,8 +96,6 @@ static int scrap_queue_spi_transaction(void)
 		status = -ESHUTDOWN;
 		goto scrap_async_done;
 	}
-
-	INIT_COMPLETION(scrap_msg.completion);
 
 	message = &scrap_msg.spi_msg;
 	spi_message_init(message);
@@ -281,13 +277,10 @@ static int scrap_probe(struct spi_device *spi_device)
 	if (down_interruptible(&scrap_dev.spi_sem))
 		return -EBUSY;
 
-	if (spi_device->chip_select == SPI_BUS_CS1) {
+	if (spi_device->chip_select == SPI_BUS_CS1)
 		scrap_dev.spi_device = spi_device;
-		init_completion(&scrap_msg.completion);
-	}
-	else {
+	else
 		status = -ENODEV;
-	}
 
 	if (!status) {
 		if (spi_device->max_speed_hz != SPI_BUS_SPEED)
