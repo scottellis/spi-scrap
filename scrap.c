@@ -34,7 +34,7 @@
 #include <asm/uaccess.h>
 #include <linux/hrtimer.h>
 
-
+#define SPI_BUFF_SIZE	32
 #define USER_BUFF_SIZE	128
 
 /* SPI bus speed = 1 MHz */
@@ -53,8 +53,7 @@ struct scrap_message {
 	struct list_head list;
 	struct spi_message spi_msg;
 	struct spi_transfer transfer;
-	u8 rx_buff[32];
-	u8 tx_buff[32]; 
+	u8 *tx_buff; 
 };
 
 static struct scrap_message scrap_msg;
@@ -102,7 +101,8 @@ static int scrap_queue_spi_transaction(void)
 	message->complete = scrap_spi_callback;
 	/* Not using this, but it will be the argument to scrap_spi_callback. */
 	message->context = &scrap_msg;
-	
+
+	/* put some data in there to watch on the scope */	
 	scrap_msg.tx_buff[0] = 0;
 	scrap_msg.tx_buff[1] = 1;
 	scrap_msg.tx_buff[2] = 2;
@@ -264,6 +264,12 @@ static int scrap_open(struct inode *inode, struct file *filp)
 		if (!scrap_dev.user_buff) 
 			status = -ENOMEM;
 	}	
+
+	if (!scrap_msg.tx_buff) {
+		scrap_msg.tx_buff = kmalloc(SPI_BUFF_SIZE, GFP_KERNEL | GFP_DMA);
+		if (!scrap_msg.tx_buff)
+			status = -ENOMEM;
+	}
 
 	up(&scrap_dev.fop_sem);
 
@@ -533,6 +539,9 @@ static void __exit scrap_exit(void)
 
 	cdev_del(&scrap_dev.cdev);
 	unregister_chrdev_region(scrap_dev.devt, 1);
+
+	if (scrap_msg.tx_buff)
+		kfree(scrap_msg.tx_buff);
 
 	if (scrap_dev.user_buff)
 		kfree(scrap_dev.user_buff);
